@@ -1,4 +1,38 @@
-import { spawn } from "child_process";
+import { spawn, type ChildProcess, type SpawnOptions } from "child_process";
+
+import { expandGcloudSpawnTarget } from "./gcloud-command.js";
+
+/**
+ * On Windows, .cmd/.bat files must run under cmd.exe so paths containing
+ * spaces (e.g. Google Cloud SDK) are not split at the shell layer.
+ */
+export function resolveSpawnTarget(
+  command: string,
+  args: string[],
+): { command: string; args: string[]; displayName: string } {
+  const gcloudTarget = expandGcloudSpawnTarget(command, args);
+  if (gcloudTarget) {
+    return gcloudTarget;
+  }
+
+  if (process.platform === "win32" && /\.(cmd|bat)$/i.test(command)) {
+    return {
+      command: process.env.ComSpec ?? "cmd.exe",
+      args: ["/c", command, ...args],
+      displayName: command,
+    };
+  }
+  return { command, args, displayName: command };
+}
+
+export function spawnCommand(
+  command: string,
+  args: string[],
+  options: SpawnOptions = {},
+): ChildProcess {
+  const target = resolveSpawnTarget(command, args);
+  return spawn(target.command, target.args, options);
+}
 
 /**
  * Build the error message for a failed child process. **Never include the
@@ -39,7 +73,8 @@ export function exec(
   options: { cwd?: string } = {},
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
+    const target = resolveSpawnTarget(command, args);
+    const child = spawn(target.command, target.args, {
       cwd: options.cwd,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -58,7 +93,11 @@ export function exec(
       if (code === 0) {
         resolve();
       } else {
-        reject(new Error(buildExecErrorMessage(command, code, stderr, stdout)));
+        reject(
+          new Error(
+            buildExecErrorMessage(target.displayName, code, stderr, stdout),
+          ),
+        );
       }
     });
     child.on("error", reject);
@@ -79,7 +118,8 @@ export function execWithStdin(
   options: { cwd?: string } = {},
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
+    const target = resolveSpawnTarget(command, args);
+    const child = spawn(target.command, target.args, {
       cwd: options.cwd,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -98,7 +138,11 @@ export function execWithStdin(
       if (code === 0) {
         resolve();
       } else {
-        reject(new Error(buildExecErrorMessage(command, code, stderr, stdout)));
+        reject(
+          new Error(
+            buildExecErrorMessage(target.displayName, code, stderr, stdout),
+          ),
+        );
       }
     });
     child.on("error", reject);
@@ -113,7 +157,8 @@ export function execOutput(
   options: { cwd?: string; timeoutMs?: number } = {},
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
+    const target = resolveSpawnTarget(command, args);
+    const child = spawn(target.command, target.args, {
       cwd: options.cwd,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -127,7 +172,9 @@ export function execOutput(
           settled = true;
           child.kill("SIGTERM");
           reject(
-            new Error(`${command} timed out after ${options.timeoutMs}ms`),
+            new Error(
+              `${target.displayName} timed out after ${options.timeoutMs}ms`,
+            ),
           );
         }
       }, options.timeoutMs);
@@ -150,7 +197,7 @@ export function execOutput(
       if (code === 0) {
         resolve(stdout.trim());
       } else {
-        reject(new Error(buildExecErrorMessage(command, code, stderr, "")));
+        reject(new Error(buildExecErrorMessage(target.displayName, code, stderr, "")));
       }
     });
     child.on("error", (err) => {

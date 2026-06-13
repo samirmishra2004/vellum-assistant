@@ -30,6 +30,8 @@ import {
   getSelectedAssistant,
   isLocalAssistant,
   isPlatformAssistant,
+  isRemoteAssistant,
+  isSelfHostedAssistant,
   loadLockfile,
   reconcileSelectedAssistant,
   syncPlatformAssistantsToLockfile,
@@ -169,6 +171,17 @@ describe("assistant classification", () => {
   test("a non-vellum entry without resources is not treated as local", () => {
     const partial = { assistantId: "x", cloud: "local" } as LockfileAssistant;
     expect(isLocalAssistant(partial)).toBe(false);
+  });
+
+  test("a remote GCE entry is self-hosted but not loopback-local", () => {
+    const remote = {
+      assistantId: "vellum-gce",
+      cloud: "gcp",
+      runtimeUrl: "http://34.55.200.115:7830",
+    } as LockfileAssistant;
+    expect(isLocalAssistant(remote)).toBe(false);
+    expect(isRemoteAssistant(remote)).toBe(true);
+    expect(isSelfHostedAssistant(remote)).toBe(true);
   });
 
   test("getLocalAssistants / getPlatformAssistants partition by cloud", () => {

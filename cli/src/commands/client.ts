@@ -9,6 +9,7 @@ import {
   lookupAssistantByIdentifier,
   resolveAssistant,
   saveAssistantEntry,
+  setActiveAssistant,
   type AssistantEntry,
 } from "../lib/assistant-config";
 import {
@@ -38,6 +39,11 @@ import {
   parseGatewayUrl,
   resolveGatewayProxyTarget,
   readAllowedGatewayPorts,
+  resolveRemoteGatewayProxyTarget,
+  readRemoteRuntimeUrls,
+  parseGatewayTokenMintPath,
+  readGcpAssistantMeta,
+  mintGcpGatewayTokenViaTunnel,
   isLoopbackAddr,
   headerHostIsLoopback,
   originIsAllowed,
@@ -389,6 +395,8 @@ const HATCH_PATTERN = /^(?:\/assistant)?\/__local\/hatch$/;
 const RETIRE_PATTERN = /^(?:\/assistant)?\/__local\/retire$/;
 const GUARDIAN_TOKEN_PATTERN =
   /^(?:\/assistant)?\/__local\/guardian-token\/([^/]+)$/;
+const GATEWAY_TOKEN_MINT_PATTERN =
+  /^(?:\/assistant)?\/__local\/gateway-token\/([^/]+)$/;
 
 function getEnvRecord(): Record<string, string> {
   const result: Record<string, string> = {};
@@ -418,6 +426,7 @@ async function handleLocalEndpoints(
     HATCH_PATTERN.test(pathname) ||
     RETIRE_PATTERN.test(pathname) ||
     GUARDIAN_TOKEN_PATTERN.test(pathname) ||
+    GATEWAY_TOKEN_MINT_PATTERN.test(pathname) ||
     parseGatewayUrl(pathname).match;
 
   if (!isLocalRoute) return null;
@@ -599,6 +608,64 @@ async function handleLocalEndpoints(
     return Response.json({ error: result.error }, { status: result.status });
   }
 
+  const gatewayTokenMatch = pathname.match(GATEWAY_TOKEN_MINT_PATTERN);
+  if (gatewayTokenMatch) {
+    if (req.method !== "POST") return new Response(null, { status: 405 });
+
+    const assistantId = decodeURIComponent(gatewayTokenMatch[1]!);
+    const parsed = parseGatewayTokenMintPath(pathname);
+    if (!parsed.match || !parsed.valid) {
+      return Response.json({ error: "Invalid assistant id" }, { status: 400 });
+    }
+
+    const gcpMeta = readGcpAssistantMeta(assistantId, lockfilePaths, _localEnv);
+    if (!gcpMeta) {
+      return Response.json(
+        {
+          error:
+            "GCP assistant not found in lockfile (or missing project/zone). Run `vellum hatch` or set GCP_PROJECT and GCP_DEFAULT_ZONE.",
+        },
+        { status: 404 },
+      );
+    }
+
+    let invocation: CliInvocation;
+    try {
+      invocation = resolveDevCliInvocation(_baseDir);
+    } catch (err) {
+      return Response.json(
+        { error: err instanceof Error ? err.message : String(err) },
+        { status: 500 },
+      );
+    }
+
+    const guardianResult = await getGuardianAccessToken(
+      assistantId,
+      configDir,
+      invocation,
+      true,
+      _localEnv,
+    );
+    if (!guardianResult.ok) {
+      return Response.json(
+        { error: guardianResult.error },
+        { status: guardianResult.status },
+      );
+    }
+
+    const webOrigin = req.headers.get("origin") ?? "http://localhost:3000";
+    const minted = await mintGcpGatewayTokenViaTunnel(
+      gcpMeta,
+      guardianResult.accessToken,
+      webOrigin,
+      _localEnv,
+    );
+    if (minted.ok) {
+      return Response.json({ token: minted.token, expiresAt: minted.expiresAt });
+    }
+    return Response.json({ error: minted.error }, { status: minted.status });
+  }
+
   // Gateway proxy — same allowlist decision the web (Vite middleware) and
   // Electron (`app://` handler) hosts use, so all three can't drift.
   const gatewayDecision = resolveGatewayProxyTarget(pathname, () =>
@@ -638,6 +705,49 @@ async function handleLocalEndpoints(
     }
   }
 
+  const remoteDecision = resolveRemoteGatewayProxyTarget(pathname, () =>
+    readRemoteRuntimeUrls(lockfilePaths),
+  );
+  if (remoteDecision.kind === "invalid-id") {
+    return new Response("Invalid assistant id", { status: 400 });
+  }
+  if (remoteDecision.kind === "forbidden-id") {
+    return new Response("Assistant is not registered for remote gateway proxy", {
+      status: 403,
+    });
+  }
+  if (remoteDecision.kind === "forward") {
+    const { target, runtimeUrl } = remoteDecision;
+    let runtime: URL;
+    try {
+      runtime = new URL(runtimeUrl);
+    } catch {
+      return new Response("Invalid runtime URL in lockfile", { status: 502 });
+    }
+    const targetUrl = `${runtime.origin}${target.path}${url.search}`;
+    const headers = new Headers(req.headers);
+    headers.set("host", runtime.host);
+
+    try {
+      const hasBody = req.method !== "GET" && req.method !== "HEAD";
+      const proxyRes = await loopbackSafeFetch(targetUrl, {
+        method: req.method,
+        headers,
+        body: hasBody ? req.body : undefined,
+        redirect: "manual",
+      });
+      const resHeaders = new Headers(proxyRes.headers);
+      resHeaders.delete("transfer-encoding");
+      return new Response(proxyRes.body, {
+        status: proxyRes.status,
+        statusText: proxyRes.statusText,
+        headers: resHeaders,
+      });
+    } catch {
+      return new Response("Remote gateway proxy error", { status: 502 });
+    }
+  }
+
   return null;
 }
 
@@ -662,6 +772,7 @@ async function runWebInterface(
   flagEnvVars: Record<string, string>,
   parsedFlagOverrides: Record<string, boolean | string>,
   disablePlatform: boolean,
+  initialAssistantId?: string,
 ): Promise<void> {
   // Propagate flag env vars so child processes (e.g. hatch from the web UI) inherit them.
   Object.assign(process.env, flagEnvVars);
@@ -670,7 +781,12 @@ async function runWebInterface(
   // (HMR, __local endpoints, gateway proxy).
   const webSourceDir = findWebSourceDir();
   if (webSourceDir) {
-    return runViteDevServer(webSourceDir, flagEnvVars, disablePlatform);
+    return runViteDevServer(
+      webSourceDir,
+      flagEnvVars,
+      disablePlatform,
+      initialAssistantId,
+    );
   }
 
   const distDir = findWebDistDir();
@@ -689,7 +805,12 @@ async function runWebInterface(
   const webUrl = getWebUrl();
   const safeJson = (v: unknown) =>
     JSON.stringify(v).replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
-  const configJson = safeJson({ webUrl, platformUrl, disablePlatform });
+  const configJson = safeJson({
+    webUrl,
+    platformUrl,
+    disablePlatform,
+    ...(initialAssistantId ? { initialAssistantId } : {}),
+  });
   const hasOverrides = Object.keys(parsedFlagOverrides).length > 0;
   const flagOverridesSnippet = hasOverrides
     ? `;window.__VELLUM_FLAG_OVERRIDES__=${safeJson(parsedFlagOverrides)}`
@@ -825,6 +946,7 @@ async function runViteDevServer(
   webSourceDir: string,
   flagEnvVars: Record<string, string>,
   disablePlatform: boolean,
+  initialAssistantId?: string,
 ): Promise<void> {
   const platformUrl = getPlatformUrl();
 
@@ -842,11 +964,14 @@ async function runViteDevServer(
       ...flagEnvVars,
       ...viteFlagVars,
       ...(disablePlatform ? { VITE_VELLUM_DISABLE_PLATFORM: "true" } : {}),
+      ...(initialAssistantId
+        ? { VITE_VELLUM_INITIAL_ASSISTANT_ID: initialAssistantId }
+        : {}),
       VITE_PLATFORM_MODE: "false",
       API_PROXY_TARGET: platformUrl,
       VELLUM_WEB_URL: getWebUrl(),
       VELLUM_PLATFORM_URL: platformUrl,
-      PORT: "3000",
+      PORT: process.env.PORT ?? "3000",
     },
   });
 
@@ -929,7 +1054,15 @@ export async function client(): Promise<void> {
   }
 
   if (interfaceId === WEB_INTERFACE_ID) {
-    await runWebInterface(flagEnvVars, parsedFlagOverrides, disablePlatform);
+    if (assistantId && assistantId !== DAEMON_INTERNAL_ASSISTANT_ID) {
+      setActiveAssistant(assistantId);
+    }
+    await runWebInterface(
+      flagEnvVars,
+      parsedFlagOverrides,
+      disablePlatform,
+      assistantId !== DAEMON_INTERNAL_ASSISTANT_ID ? assistantId : undefined,
+    );
     return;
   }
 

@@ -1,4 +1,3 @@
-import { spawn } from "child_process";
 import { createReadStream, existsSync, statSync } from "fs";
 import { createInterface } from "readline";
 import { watch } from "fs";
@@ -11,8 +10,9 @@ import {
   type AssistantEntry,
 } from "../lib/assistant-config";
 import { dockerResourceNames } from "../lib/docker";
+import { resolveGcloudCommand } from "../lib/gcloud-command.js";
 import { getLogDir } from "../lib/xdg-log";
-import { execOutput } from "../lib/step-runner";
+import { execOutput, spawnCommand } from "../lib/step-runner";
 
 // ── Arg parsing ─────────────────────────────────────────────────
 
@@ -467,7 +467,7 @@ async function showGcpLogs(
 
   if (opts.follow) {
     // For follow mode, stream output directly to terminal
-    const child = spawn("gcloud", args, { stdio: "inherit" });
+    const child = spawnCommand(resolveGcloudCommand(), args, { stdio: "inherit" });
     await new Promise<void>((resolve, reject) => {
       child.on("close", (code) => {
         if (code !== 0 && code !== null) {
@@ -480,7 +480,7 @@ async function showGcpLogs(
     });
   } else {
     try {
-      const output = await execOutput("gcloud", args);
+      const output = await execOutput(resolveGcloudCommand(), args);
       console.log(output);
     } catch (err) {
       console.error(

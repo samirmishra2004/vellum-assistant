@@ -27,8 +27,9 @@ import { create } from "zustand";
 import { createSelectors } from "@/utils/create-selectors";
 import {
   isLocalMode,
-  isLocalAssistant,
   isPlatformAssistant,
+  isSelfHostedAssistant,
+  readInitialAssistantIdFromShell,
 } from "@/lib/local-mode";
 import {
   SELECTED_ASSISTANT_STORAGE_KEY,
@@ -108,11 +109,15 @@ const useResolvedAssistantsStoreBase = create<ResolvedAssistantsStore>(
         id: a.assistantId,
         name: a.name,
         hatchedAt: a.hatchedAt,
-        isLocal: isLocalAssistant(a),
+        isLocal: isSelfHostedAssistant(a),
         isPlatformHosted: isPlatformAssistant(a),
         organizationId: a.organizationId,
       }));
       set({ assistants, assistantsHydrated: true });
+      const shellTarget = readInitialAssistantIdFromShell();
+      if (shellTarget && assistants.some((a) => a.id === shellTarget)) {
+        get().setSelectedAssistant(shellTarget);
+      }
       // The lockfile carries every org's entries, so an id absent from it is
       // genuinely gone — safe to prune. (The API list is org-scoped, so
       // `setFromApi` deliberately does NOT reconcile; a cross-org selection

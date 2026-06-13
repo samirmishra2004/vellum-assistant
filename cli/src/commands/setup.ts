@@ -1,4 +1,5 @@
 import { resolveAssistant } from "../lib/assistant-config.js";
+import { resolveGcpGuardianBearer } from "../lib/gcp.js";
 import {
   leaseGuardianToken,
   loadGuardianToken,
@@ -58,6 +59,13 @@ async function resolveSetupBearerToken(
     );
     if (isGuardianAccessTokenUsable(refreshedToken)) {
       return refreshedToken.accessToken;
+    }
+  }
+
+  if (entry.cloud === "gcp") {
+    const gcpBearer = await resolveGcpGuardianBearer(entry);
+    if (gcpBearer) {
+      return gcpBearer;
     }
   }
 

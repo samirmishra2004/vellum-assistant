@@ -11,7 +11,7 @@ import { RouterProvider } from "react-router";
 import { AppProviders } from "@/components/providers";
 import { WindowDragRegion } from "@/components/window-drag-region";
 import { isChunkLoadError } from "@/lib/chunk-errors";
-import { isLocalMode, loadLockfile } from "@/lib/local-mode";
+import { isLocalMode, loadLockfile, readInitialAssistantIdFromShell } from "@/lib/local-mode";
 import { initSentry } from "@/lib/sentry/sentry-init";
 import { setupAuthListeners, useAuthStore } from "@/stores/auth-store";
 import { setupOrganizationStore } from "@/stores/organization-store";
@@ -32,6 +32,14 @@ async function boot() {
   if (isLocalMode()) {
     await loadLockfile();
     await useAuthStore.getState().initSession();
+    const shellAssistantId = readInitialAssistantIdFromShell();
+    if (shellAssistantId) {
+      try {
+        await useAuthStore.getState().connectLocalAssistant(shellAssistantId);
+      } catch (err) {
+        console.error("Failed to auto-connect shell assistant", err);
+      }
+    }
   } else {
     useAuthStore.getState().initSession();
   }

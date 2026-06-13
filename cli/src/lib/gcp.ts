@@ -2,19 +2,33 @@ import { unlinkSync, writeFileSync } from "fs";
 import { tmpdir, userInfo } from "os";
 import { join } from "path";
 
-import { saveAssistantEntry, setActiveAssistant } from "./assistant-config";
+import {
+  lookupAssistantByIdentifier,
+  saveAssistantEntry,
+  setActiveAssistant,
+} from "./assistant-config";
 import type { AssistantEntry } from "./assistant-config";
 import { FIREWALL_TAG, GATEWAY_PORT } from "./constants";
 import { PROVIDER_ENV_VAR_NAMES } from "../shared/provider-env-vars.js";
 import type { Species } from "./constants";
-import { leaseGuardianToken } from "./guardian-token";
+import {
+  leaseGuardianToken,
+  loadGuardianToken,
+  refreshGuardianToken,
+  resetGuardianBootstrap,
+  type GuardianTokenData,
+} from "./guardian-token";
+import { loopbackSafeFetch } from "./loopback-fetch.js";
 import { getPlatformUrl } from "./platform-client";
 import { generateInstanceName } from "./random-name";
-import { exec, execOutput } from "./step-runner";
+import { resolveGcloudCommand } from "./gcloud-command.js";
+import { exec, execOutput, spawnCommand } from "./step-runner";
 import { emitProgress } from "./desktop-progress.js";
 
+const GCLOUD = resolveGcloudCommand();
+
 export async function getActiveProject(): Promise<string> {
-  const output = await execOutput("gcloud", ["config", "get-value", "project"]);
+  const output = await execOutput(GCLOUD, ["config", "get-value", "project"]);
   const project = output.trim();
   if (!project || project === "(unset)") {
     throw new Error(
@@ -60,7 +74,7 @@ async function describeFirewallRule(
       "--format=json(name,direction,allowed,sourceRanges,destinationRanges,targetTags,description)",
     ];
     if (account) args.push(`--account=${account}`);
-    const output = await execOutput("gcloud", args);
+    const output = await execOutput(GCLOUD, args);
     const parsed = JSON.parse(output);
     const allowed = (parsed.allowed ?? [])
       .map((a: { IPProtocol: string; ports?: string[] }) => {
@@ -124,7 +138,7 @@ async function createFirewallRule(
     args.push(`--destination-ranges=${spec.destinationRanges}`);
   }
   if (account) args.push(`--account=${account}`);
-  await exec("gcloud", args);
+  await exec(GCLOUD, args);
 }
 
 async function deleteFirewallRule(
@@ -141,7 +155,7 @@ async function deleteFirewallRule(
     "--quiet",
   ];
   if (account) args.push(`--account=${account}`);
-  await exec("gcloud", args);
+  await exec(GCLOUD, args);
 }
 
 export async function syncFirewallRules(
@@ -160,7 +174,7 @@ export async function syncFirewallRules(
       "--format=json(name,targetTags)",
     ];
     if (account) listArgs.push(`--account=${account}`);
-    const output = await execOutput("gcloud", listArgs);
+    const output = await execOutput(GCLOUD, listArgs);
     const allRules = JSON.parse(output) as Array<{
       name: string;
       targetTags?: string[];
@@ -218,7 +232,7 @@ export async function instanceExists(
       "--format=get(name)",
     ];
     if (account) args.push(`--account=${account}`);
-    await execOutput("gcloud", args);
+    await execOutput(GCLOUD, args);
     return true;
   } catch (error) {
     const msg = error instanceof Error ? error.message.toLowerCase() : "";
@@ -259,7 +273,7 @@ export async function fetchAndDisplayStartupLogs(
       `--command=${remoteCmd}`,
     ];
     if (account) args.push(`--account=${account}`);
-    const output = await execOutput("gcloud", args);
+    const output = await execOutput(GCLOUD, args);
     console.log("📋 Startup logs from instance:");
     for (const line of output.split("\n")) {
       console.log(`   ${line}`);
@@ -273,7 +287,7 @@ export async function fetchAndDisplayStartupLogs(
 
 async function checkGcloudAvailable(): Promise<boolean> {
   try {
-    await execOutput("gcloud", ["--version"]);
+    await execOutput(GCLOUD, ["--version"]);
     return true;
   } catch {
     return false;
@@ -294,6 +308,245 @@ export interface WatchHatchingResult {
 
 const INSTALL_SCRIPT_REMOTE_PATH = "/tmp/vellum-install.sh";
 const MACHINE_TYPE = "e2-standard-4"; // 4 vCPUs, 16 GB memory
+/** Local port for the SSH tunnel used to reach loopback-only guardian/init. */
+const GCP_TUNNEL_LOCAL_PORT = 17830;
+
+async function waitForTunnelReady(
+  localPort: number,
+  timeoutMs = 45_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  const healthUrl = `http://127.0.0.1:${localPort}/healthz`;
+  while (Date.now() < deadline) {
+    try {
+      const response = await loopbackSafeFetch(healthUrl, { method: "GET" });
+      if (response.ok) return;
+    } catch {
+      // Tunnel not ready yet.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  throw new Error(
+    `SSH tunnel to 127.0.0.1:${localPort} did not become ready within ${timeoutMs / 1000}s`,
+  );
+}
+
+/**
+ * Lease a guardian JWT for a GCP assistant. Without a bootstrap secret the
+ * gateway only accepts guardian/init from loopback, so we open a short-lived
+ * SSH tunnel and call init against 127.0.0.1 on the laptop.
+ */
+function isGuardianAccessTokenUsable(
+  tokenData: GuardianTokenData | null,
+): tokenData is GuardianTokenData {
+  if (!tokenData?.accessToken) {
+    return false;
+  }
+  const expiresAt = new Date(tokenData.accessTokenExpiresAt).getTime();
+  return Number.isFinite(expiresAt) && expiresAt > Date.now();
+}
+
+function isLoopbackGatewayUrl(gatewayUrl: string): boolean {
+  try {
+    const host = new URL(gatewayUrl).hostname.toLowerCase();
+    return (
+      host === "localhost" ||
+      host === "[::1]" ||
+      host === "::1" ||
+      /^127(?:\.\d{1,3}){3}$/.test(host)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve a usable guardian access token for a GCP assistant. Refreshes over
+ * loopback when possible; otherwise leases a fresh token via SSH tunnel.
+ */
+export async function resolveGcpGuardianBearer(
+  entry: Pick<
+    AssistantEntry,
+    | "assistantId"
+    | "project"
+    | "zone"
+    | "guardianBootstrapSecret"
+    | "runtimeUrl"
+    | "localUrl"
+  >,
+): Promise<string | undefined> {
+  const gatewayUrl = entry.localUrl ?? entry.runtimeUrl;
+  const guardianToken = loadGuardianToken(entry.assistantId);
+  if (isGuardianAccessTokenUsable(guardianToken)) {
+    return guardianToken.accessToken;
+  }
+
+  if (guardianToken && isLoopbackGatewayUrl(gatewayUrl)) {
+    const refreshedToken = await refreshGuardianToken(
+      gatewayUrl,
+      entry.assistantId,
+    );
+    if (isGuardianAccessTokenUsable(refreshedToken)) {
+      return refreshedToken.accessToken;
+    }
+  }
+
+  const project = entry.project ?? process.env.GCP_PROJECT;
+  const zone = entry.zone ?? process.env.GCP_DEFAULT_ZONE;
+  if (!project || !zone) {
+    return undefined;
+  }
+
+  try {
+    await leaseGcpGuardianTokenViaLocalTunnel(
+      entry.assistantId,
+      project,
+      zone,
+      process.env.GCP_ACCOUNT_EMAIL,
+      typeof entry.guardianBootstrapSecret === "string"
+        ? entry.guardianBootstrapSecret
+        : undefined,
+    );
+  } catch {
+    return undefined;
+  }
+
+  const leasedToken = loadGuardianToken(entry.assistantId);
+  return isGuardianAccessTokenUsable(leasedToken)
+    ? leasedToken.accessToken
+    : undefined;
+}
+
+export async function fetchGcpBootstrapSecretFromVm(
+  instanceName: string,
+  project: string,
+  zone: string,
+  sshUser?: string,
+  account?: string,
+): Promise<string | undefined> {
+  const sshTarget = sshUser ? `${sshUser}@${instanceName}` : instanceName;
+  const remoteCommand = [
+    "bash -lc",
+    `'jq -r ".assistants[0].guardianBootstrapSecret // empty" "$HOME/.vellum.lock.json" 2>/dev/null'`,
+  ].join(" ");
+  const sshArgs = [
+    "compute",
+    "ssh",
+    sshTarget,
+    `--project=${project}`,
+    `--zone=${zone}`,
+    "--quiet",
+    `--command=${remoteCommand}`,
+  ];
+  if (account) sshArgs.splice(4, 0, `--account=${account}`);
+
+  try {
+    const output = (await execOutput(GCLOUD, sshArgs)).trim();
+    return output.length > 0 ? output : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function resolveGcpBootstrapSecret(
+  instanceName: string,
+  project: string,
+  zone: string,
+  account?: string,
+  bootstrapSecret?: string,
+): Promise<string | undefined> {
+  if (bootstrapSecret) {
+    return bootstrapSecret;
+  }
+
+  const lookup = lookupAssistantByIdentifier(instanceName);
+  if (lookup.status === "found" && lookup.entry.guardianBootstrapSecret) {
+    return lookup.entry.guardianBootstrapSecret;
+  }
+
+  const sshUser =
+    lookup.status === "found" ? lookup.entry.sshUser : undefined;
+  const recovered = await fetchGcpBootstrapSecretFromVm(
+    instanceName,
+    project,
+    zone,
+    sshUser,
+    account,
+  );
+  if (recovered && lookup.status === "found") {
+    saveAssistantEntry({
+      ...lookup.entry,
+      guardianBootstrapSecret: recovered,
+    });
+  }
+  return recovered;
+}
+
+async function leaseGuardianTokenWithBootstrapRecovery(
+  gatewayUrl: string,
+  assistantId: string,
+  bootstrapSecret?: string,
+): Promise<void> {
+  try {
+    await leaseGuardianToken(gatewayUrl, assistantId, bootstrapSecret);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (
+      bootstrapSecret &&
+      message.toLowerCase().includes("bootstrap secret already used")
+    ) {
+      await resetGuardianBootstrap(gatewayUrl, bootstrapSecret);
+      await leaseGuardianToken(gatewayUrl, assistantId, bootstrapSecret);
+      return;
+    }
+    throw err;
+  }
+}
+
+export async function leaseGcpGuardianTokenViaLocalTunnel(
+  instanceName: string,
+  project: string,
+  zone: string,
+  account?: string,
+  bootstrapSecret?: string,
+): Promise<void> {
+  const resolvedBootstrapSecret = await resolveGcpBootstrapSecret(
+    instanceName,
+    project,
+    zone,
+    account,
+    bootstrapSecret,
+  );
+
+  const tunnelArgs = [
+    "compute",
+    "ssh",
+    instanceName,
+    `--project=${project}`,
+    `--zone=${zone}`,
+    "--quiet",
+    "--",
+    "-N",
+    "-L",
+    `${GCP_TUNNEL_LOCAL_PORT}:127.0.0.1:${GATEWAY_PORT}`,
+  ];
+  if (account) tunnelArgs.splice(4, 0, `--account=${account}`);
+
+  console.log("🔐 Leasing guardian token via SSH tunnel...");
+  const tunnel = spawnCommand(GCLOUD, tunnelArgs, { stdio: "ignore" });
+
+  try {
+    await waitForTunnelReady(GCP_TUNNEL_LOCAL_PORT);
+    await leaseGuardianTokenWithBootstrapRecovery(
+      `http://127.0.0.1:${GCP_TUNNEL_LOCAL_PORT}`,
+      instanceName,
+      resolvedBootstrapSecret,
+    );
+    console.log("✅ Guardian token saved locally.");
+  } finally {
+    tunnel.kill();
+  }
+}
 
 const DESIRED_FIREWALL_RULES: FirewallRuleSpec[] = [
   {
@@ -320,7 +573,8 @@ import INSTALL_SCRIPT_CONTENT from "../adapters/install.sh" with { type: "text" 
 
 function resolveInstallScriptPath(): string {
   const tmpPath = join(tmpdir(), `vellum-install-${process.pid}.sh`);
-  writeFileSync(tmpPath, INSTALL_SCRIPT_CONTENT, { mode: 0o755 });
+  const normalized = INSTALL_SCRIPT_CONTENT.replace(/\r\n/g, "\n");
+  writeFileSync(tmpPath, normalized, { mode: 0o755, encoding: "utf8" });
   return tmpPath;
 }
 
@@ -350,7 +604,7 @@ async function pollInstance(
       `--command=${remoteCmd}`,
     ];
     if (account) args.push(`--account=${account}`);
-    const output = await execOutput("gcloud", args);
+    const output = await execOutput(GCLOUD, args);
     const sepIdx = output.indexOf("===HATCH_SEP===");
     if (sepIdx === -1) {
       return {
@@ -400,14 +654,14 @@ async function checkCurlFailure(
       `--command=test -s ${INSTALL_SCRIPT_REMOTE_PATH} && echo EXISTS || echo MISSING`,
     ];
     if (account) args.push(`--account=${account}`);
-    const output = await execOutput("gcloud", args);
+    const output = await execOutput(GCLOUD, args);
     return output.trim() === "MISSING";
   } catch {
     return false;
   }
 }
 
-async function recoverFromCurlFailure(
+export async function recoverFromCurlFailure(
   instanceName: string,
   project: string,
   zone: string,
@@ -426,7 +680,7 @@ async function recoverFromCurlFailure(
   ];
   if (account) scpArgs.push(`--account=${account}`);
   console.log("\ud83d\udccb Uploading install script to instance...");
-  await exec("gcloud", scpArgs);
+  await exec(GCLOUD, scpArgs);
 
   const sshArgs = [
     "compute",
@@ -438,7 +692,7 @@ async function recoverFromCurlFailure(
   ];
   if (account) sshArgs.push(`--account=${account}`);
   console.log("\ud83d\udd27 Running install script on instance...");
-  await exec("gcloud", sshArgs);
+  await exec(GCLOUD, sshArgs);
   try {
     unlinkSync(installScriptPath);
   } catch {}
@@ -566,7 +820,7 @@ export async function hatchGcp(
         "--no-scopes",
       ];
       if (account) createArgs.push(`--account=${account}`);
-      await exec("gcloud", createArgs);
+      await exec(GCLOUD, createArgs);
     } finally {
       try {
         unlinkSync(startupScriptPath);
@@ -595,7 +849,7 @@ export async function hatchGcp(
         "--format=get(networkInterfaces[0].accessConfigs[0].natIP)",
       ];
       if (account) describeArgs.push(`--account=${account}`);
-      const ipOutput = await execOutput("gcloud", describeArgs);
+      const ipOutput = await execOutput(GCLOUD, describeArgs);
       externalIp = ipOutput.trim() || null;
     } catch {
       console.log(
@@ -616,6 +870,7 @@ export async function hatchGcp(
       species,
       sshUser,
       hatchedAt: new Date().toISOString(),
+      guardianBootstrapSecret: laptopBootstrapSecret || undefined,
     };
     saveAssistantEntry(gcpEntry);
     setActiveAssistant(instanceName);
@@ -677,10 +932,12 @@ export async function hatchGcp(
 
       emitProgress(5, 5, "Finalizing...");
       try {
-        await leaseGuardianToken(
-          runtimeUrl,
+        await leaseGcpGuardianTokenViaLocalTunnel(
           instanceName,
-          laptopBootstrapSecret,
+          project,
+          zone,
+          account,
+          laptopBootstrapSecret || undefined,
         );
       } catch (err) {
         console.warn(
@@ -740,7 +997,7 @@ export async function retireInstance(
 
   if (source) {
     try {
-      await exec("gcloud", [
+      await exec(GCLOUD, [
         "compute",
         "instances",
         "add-labels",
@@ -756,7 +1013,7 @@ export async function retireInstance(
 
   console.log(`\u{1F5D1}\ufe0f  Deleting GCP instance ${name}\n`);
 
-  await exec("gcloud", [
+  await exec(GCLOUD, [
     "compute",
     "instances",
     "delete",

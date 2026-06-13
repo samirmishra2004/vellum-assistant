@@ -33,7 +33,12 @@ import { client as platformClient } from "@/generated/api/client.gen";
 import { client as authClient } from "@/generated/auth/client.gen";
 import { client as daemonClient } from "@/generated/daemon/client.gen";
 import { ensureCsrfCookie, getCsrfToken } from "@/lib/auth/csrf";
-import { isLocalMode, isPlatformDisabled } from "@/lib/local-mode";
+import {
+  isLocalMode,
+  isPlatformDisabled,
+  revalidateGatewaySession,
+} from "@/lib/local-mode";
+import { isGatewayAuthMode } from "@/lib/auth/gateway-session";
 import {
     getSelfHostedActorToken,
     getSelfHostedIngressUrl,
@@ -251,6 +256,8 @@ export const daemonRequestInterceptor = createInterceptor({
  * installed on platform/auth clients (a 502 from Django is a
  * different failure domain).
  */
+let gatewaySessionRefresh: Promise<void> | null = null;
+
 export function daemonUnreachableInterceptor(response: Response): Response {
   if (UNREACHABLE_STATUS_CODES.has(response.status)) {
     notifyAssistantUnreachable();
@@ -258,8 +265,20 @@ export function daemonUnreachableInterceptor(response: Response): Response {
   return response;
 }
 
+/** Re-mint the gateway session JWT after an auth rejection (stale signing key). */
+export function daemonAuthRecoveryInterceptor(response: Response): Response {
+  if (response.status === 401 && isGatewayAuthMode()) {
+    if (!gatewaySessionRefresh) {
+      gatewaySessionRefresh = revalidateGatewaySession().finally(() => {
+        gatewaySessionRefresh = null;
+      });
+    }
+  }
+  return daemonUnreachableInterceptor(response);
+}
+
 daemonClient.interceptors.request.use(daemonRequestInterceptor);
-daemonClient.interceptors.response.use(daemonUnreachableInterceptor);
+daemonClient.interceptors.response.use(daemonAuthRecoveryInterceptor);
 
 // Force JSON body parsing for all three generated clients. The default
 // `parseAs: 'auto'` infers the parsing strategy from the Content-Type

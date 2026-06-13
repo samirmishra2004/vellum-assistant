@@ -114,9 +114,12 @@ export async function buildStartupScript(
   const envSetLines = Object.entries(allEnvEntries)
     .map(([envVar, value]) => `${envVar}=${value}`)
     .join("\n");
-  const dotenvLines = Object.keys(providerApiKeys)
-    .map((envVar) => `${envVar}=\$${envVar}`)
-    .join("\n");
+  const dotenvLines = [
+    ...Object.keys(providerApiKeys).map(
+      (envVar) => `${envVar}=\$${envVar}`,
+    ),
+    "GUARDIAN_BOOTSTRAP_SECRET=\$GUARDIAN_BOOTSTRAP_SECRET",
+  ].join("\n");
 
   // Write --config key=value pairs to a temp JSON file on the remote host
   // and export the env var so the daemon reads it on first boot.

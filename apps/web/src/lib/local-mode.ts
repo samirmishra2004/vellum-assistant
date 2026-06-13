@@ -265,6 +265,15 @@ export function isLocalAssistant(a: LockfileAssistant): boolean {
   return a.cloud !== "vellum" && a.resources?.gatewayPort != null;
 }
 
+/**
+ * Self-hosted assistants the web client can reach through the dev-server
+ * gateway proxy — loopback entries (`__gateway/{port}`) and remote lockfile
+ * entries (`__remote/{assistantId}`) such as GCE deployments.
+ */
+export function isSelfHostedAssistant(a: LockfileAssistant): boolean {
+  return isLocalAssistant(a) || isRemoteAssistant(a);
+}
+
 export function isPlatformAssistant(a: LockfileAssistant): boolean {
   return a.cloud === "vellum";
 }
@@ -287,6 +296,10 @@ export function isGuardianRepairable(assistantId: string): boolean {
 
 export function getLocalAssistants(): LockfileAssistant[] {
   return getLockfile().assistants.filter(isLocalAssistant);
+}
+
+export function getSelfHostedAssistants(): LockfileAssistant[] {
+  return getLockfile().assistants.filter(isSelfHostedAssistant);
 }
 
 export function getPlatformAssistants(): LockfileAssistant[] {
@@ -345,17 +358,42 @@ export function gatewayProxyUrl(port: number): string {
   return `/assistant/__gateway/${port}`;
 }
 
+export function remoteGatewayProxyUrl(assistantId: string): string {
+  return `/assistant/__remote/${encodeURIComponent(assistantId)}`;
+}
+
 /**
- * Return the local gateway proxy URL for the given assistant (default: the
- * selected one), or `undefined` when not in local mode / not a local
- * assistant.
+ * Remote assistants (GCE, paired imports, etc.) reach the gateway through the
+ * dev-server `__remote/{assistantId}` proxy. Local/docker assistants use the
+ * loopback `__gateway/{port}` path instead.
+ */
+export function isRemoteAssistant(a: LockfileAssistant): boolean {
+  if (!a.runtimeUrl) return false;
+  if (a.resources?.gatewayPort != null) return false;
+  try {
+    const parsed = new URL(a.runtimeUrl);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Return the gateway proxy URL for the given assistant (default: the
+ * selected one), or `undefined` when not in local mode / no proxy path applies.
  */
 export function getLocalGatewayUrl(
   assistant: LockfileAssistant | undefined = getSelectedAssistant(),
 ): string | undefined {
   if (!isLocalMode()) return undefined;
-  if (!assistant || !isLocalAssistant(assistant)) return undefined;
-  return gatewayProxyUrl(assistant.resources!.gatewayPort);
+  if (!assistant) return undefined;
+  if (isLocalAssistant(assistant)) {
+    return gatewayProxyUrl(assistant.resources!.gatewayPort);
+  }
+  if (isRemoteAssistant(assistant)) {
+    return remoteGatewayProxyUrl(assistant.assistantId);
+  }
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -377,6 +415,10 @@ export async function primeLocalGatewayConnection(
   const assistant = target ?? getSelectedAssistant();
   const tokenUrl = getLocalTokenUrl(assistant);
   if (!tokenUrl) return;
+  // Always discard a cached gateway JWT before minting. A token can still be
+  // within its TTL while the gateway's signing key has rotated (invalid_signature
+  // on every request → auth-failure rate limit → HTTP 429).
+  clearGatewayToken();
   const guardianToken = assistant
     ? await fetchGuardianTokenHost(assistant.assistantId)
     : undefined;
@@ -387,6 +429,13 @@ export async function primeLocalGatewayConnection(
     url: `${window.location.origin}${localGateway}`,
     token: getGatewayToken(),
   });
+}
+
+/** Drop a stale gateway JWT and mint a fresh one for the selected assistant. */
+export async function revalidateGatewaySession(
+  target?: LockfileAssistant,
+): Promise<void> {
+  await primeLocalGatewayConnection(target);
 }
 
 /**
@@ -421,10 +470,23 @@ export async function primeLocalGatewayConnectionWithRepair(
     return;
   } catch (error) {
     if (!isRepairableConnectError(error)) throw error;
+    // Remote assistants (GCE, etc.) are not repairable via local `wake`.
+    if (target && isRemoteAssistant(target)) throw error;
     const assistantId = (target ?? getSelectedAssistant())?.assistantId;
     if (!assistantId) throw error;
     const repair = await wakeLocalAssistantHost(assistantId);
     if (!repair.ok) throw error;
     await primeLocalGatewayConnection(target);
   }
+}
+
+/** Shell-injected assistant target from `vellum client <id> --interface web`. */
+export function readInitialAssistantIdFromShell(): string | undefined {
+  const cfg = (
+    window as unknown as {
+      __VELLUM_CONFIG__?: { initialAssistantId?: string };
+    }
+  ).__VELLUM_CONFIG__;
+  const id = cfg?.initialAssistantId;
+  return typeof id === "string" && id.length > 0 ? id : undefined;
 }

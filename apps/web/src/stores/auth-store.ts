@@ -45,7 +45,7 @@ import {
 import {
   isLocalMode,
   getPlatformAssistants,
-  getLocalAssistants,
+  getSelfHostedAssistants,
   primeLocalGatewayConnection,
   primeLocalGatewayConnectionWithRepair,
   syncPlatformAssistantsToLockfile,
@@ -593,7 +593,7 @@ const useAuthStoreBase = create<AuthStore>()((set, get) => ({
    * stays on the plain primitive so app launch never spawns daemon processes.
    */
   connectLocalAssistant: async (assistantId: string) => {
-    const target = getLocalAssistants().find(
+    const target = getSelfHostedAssistants().find(
       (a) => a.assistantId === assistantId,
     );
     await primeLocalGatewayConnectionWithRepair(target);

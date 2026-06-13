@@ -540,6 +540,11 @@ export async function postChatMessage(
         ? (errorBody.error as Record<string, unknown>)
         : {};
 
+    const gatewayAuthRateLimit =
+      sendResponse.status === 429 &&
+      typeof errorBody.error === "string" &&
+      errorBody.error.includes("failed attempts");
+
     // The daemon's non-standard error envelopes use `errorBody.error` as a
     // bare code string (e.g. "secret_blocked") and `errorBody.message` for
     // the user-facing copy. Treat `errorBody.error` (string) only as a code
@@ -549,8 +554,9 @@ export async function postChatMessage(
       ok: false,
       status: sendResponse.status,
       error: {
-        code:
-          typeof errorBody.code === "string"
+        code: gatewayAuthRateLimit
+          ? "auth_rate_limited"
+          : typeof errorBody.code === "string"
             ? errorBody.code
             : typeof nestedError.code === "string"
               ? nestedError.code
@@ -566,6 +572,9 @@ export async function postChatMessage(
             : undefined) ??
           (typeof nestedError.message === "string"
             ? nestedError.message
+            : undefined) ??
+          (gatewayAuthRateLimit && typeof errorBody.error === "string"
+            ? errorBody.error
             : undefined) ??
           `HTTP ${sendResponse.status}`,
       },

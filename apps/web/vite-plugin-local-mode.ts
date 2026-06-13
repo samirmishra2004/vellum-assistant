@@ -19,6 +19,11 @@ import {
   getGuardianAccessToken,
   resolveGatewayProxyTarget,
   readAllowedGatewayPorts,
+  resolveRemoteGatewayProxyTarget,
+  readRemoteRuntimeUrls,
+  parseGatewayTokenMintPath,
+  readGcpAssistantMeta,
+  mintGcpGatewayTokenViaTunnel,
   type CliInvocation,
 } from "@vellumai/local-mode";
 
@@ -32,6 +37,12 @@ export function localModePlugin(env: Record<string, string>): Plugin {
   const configJson = JSON.stringify({
     webUrl: config.webUrl,
     platformUrl: config.platformUrl,
+    ...(env.VITE_VELLUM_INITIAL_ASSISTANT_ID
+      ? { initialAssistantId: env.VITE_VELLUM_INITIAL_ASSISTANT_ID }
+      : {}),
+    ...(env.VITE_VELLUM_DISABLE_PLATFORM === "true"
+      ? { disablePlatform: true }
+      : {}),
   });
 
   return {
@@ -54,7 +65,11 @@ export function localModePlugin(env: Record<string, string>): Plugin {
       server.middlewares.use(
         guardianTokenMiddleware(config.configDir, baseDir, env),
       );
+      server.middlewares.use(
+        gatewayTokenMintMiddleware(config.lockfilePaths, config.configDir, baseDir, env),
+      );
       server.middlewares.use(gatewayProxyMiddleware(config.lockfilePaths));
+      server.middlewares.use(remoteGatewayProxyMiddleware(config.lockfilePaths));
       server.middlewares.use(accountSpaFallback(server));
     },
   };
@@ -445,6 +460,107 @@ function guardianTokenMiddleware(
   };
 }
 
+function gatewayTokenMintMiddleware(
+  lockfilePaths: string[],
+  configDir: string,
+  baseDir: string,
+  env: Record<string, string>,
+): Connect.NextHandleFunction {
+  return (req, res, next) => {
+    const pathname = (req.url ?? "").split("?")[0] ?? "";
+    const parsed = parseGatewayTokenMintPath(pathname);
+    if (!parsed.match) return next();
+
+    if (req.method !== "POST") {
+      res.statusCode = 405;
+      res.end();
+      return;
+    }
+
+    if (rejectUnlessLocalEndpointRequest(req, res)) return;
+
+    if (!parsed.valid) {
+      res.statusCode = 400;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ error: "Invalid assistant id" }));
+      return;
+    }
+
+    const assistantId = parsed.assistantId;
+    const gcpMeta = readGcpAssistantMeta(assistantId, lockfilePaths, env);
+    if (!gcpMeta) {
+      res.statusCode = 404;
+      res.setHeader("Content-Type", "application/json");
+      res.end(
+        JSON.stringify({
+          error:
+            "GCP assistant not found in lockfile (or missing project/zone). Run `vellum hatch` or set GCP_PROJECT and GCP_DEFAULT_ZONE.",
+        }),
+      );
+      return;
+    }
+
+    let invocation: CliInvocation;
+    try {
+      invocation = resolveDevCliInvocation(baseDir, import.meta.url);
+    } catch (err) {
+      res.statusCode = 500;
+      res.setHeader("Content-Type", "application/json");
+      res.end(
+        JSON.stringify({
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
+      return;
+    }
+
+    const origin = Array.isArray(req.headers.origin)
+      ? req.headers.origin[0]
+      : req.headers.origin;
+    const webOrigin = origin ?? "http://localhost:3000";
+
+    getGuardianAccessToken(assistantId, configDir, invocation, true, env).then(
+      async (guardianResult) => {
+        try {
+          if (!guardianResult.ok) {
+            res.statusCode = guardianResult.status;
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ error: guardianResult.error }));
+            return;
+          }
+
+          const minted = await mintGcpGatewayTokenViaTunnel(
+            gcpMeta,
+            guardianResult.accessToken,
+            webOrigin,
+            env,
+          );
+          if (minted.ok) {
+            res.setHeader("Content-Type", "application/json");
+            res.end(
+              JSON.stringify({ token: minted.token, expiresAt: minted.expiresAt }),
+            );
+          } else {
+            res.statusCode = minted.status;
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ error: minted.error }));
+          }
+        } catch (err) {
+          if (!res.headersSent) {
+            res.statusCode = 500;
+            res.setHeader("Content-Type", "application/json");
+            res.end(
+              JSON.stringify({
+                error: err instanceof Error ? err.message : String(err),
+              }),
+            );
+          }
+        }
+      },
+    );
+  };
+}
+
 function gatewayProxyMiddleware(
   lockfilePaths: string[],
 ): Connect.NextHandleFunction {
@@ -494,6 +610,73 @@ function gatewayProxyMiddleware(
       if (!res.headersSent) {
         res.statusCode = 502;
         res.end("Gateway proxy error");
+      }
+    });
+
+    req.pipe(proxyReq);
+  };
+}
+
+function remoteGatewayProxyMiddleware(
+  lockfilePaths: string[],
+): Connect.NextHandleFunction {
+  return (req, res, next) => {
+    const pathname = (req.url ?? "").split("?")[0] ?? "";
+    const decision = resolveRemoteGatewayProxyTarget(pathname, () =>
+      readRemoteRuntimeUrls(lockfilePaths),
+    );
+    if (decision.kind === "pass") return next();
+
+    if (rejectUnlessLocalEndpointRequest(req, res)) return;
+
+    if (decision.kind === "invalid-id") {
+      res.statusCode = 400;
+      res.end("Invalid assistant id");
+      return;
+    }
+
+    if (decision.kind === "forbidden-id") {
+      res.statusCode = 403;
+      res.end("Assistant is not registered for remote gateway proxy");
+      return;
+    }
+
+    const { target, runtimeUrl } = decision;
+    let runtime: URL;
+    try {
+      runtime = new URL(runtimeUrl);
+    } catch {
+      res.statusCode = 502;
+      res.end("Invalid runtime URL in lockfile");
+      return;
+    }
+
+    const search = (req.url ?? "").includes("?")
+      ? (req.url ?? "").slice((req.url ?? "").indexOf("?"))
+      : "";
+    const proxyOptions: http.RequestOptions = {
+      hostname: runtime.hostname,
+      port: runtime.port
+        ? Number(runtime.port)
+        : runtime.protocol === "https:"
+          ? 443
+          : 80,
+      path: target.path + search,
+      method: req.method,
+      headers: { ...req.headers, host: runtime.host },
+    };
+
+    const proxyReq = http.request(proxyOptions, (proxyRes) => {
+      const headers = { ...proxyRes.headers };
+      delete headers["transfer-encoding"];
+      res.writeHead(proxyRes.statusCode ?? 502, headers);
+      proxyRes.pipe(res);
+    });
+
+    proxyReq.on("error", () => {
+      if (!res.headersSent) {
+        res.statusCode = 502;
+        res.end("Remote gateway proxy error");
       }
     });
 

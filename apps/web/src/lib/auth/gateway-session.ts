@@ -1,6 +1,7 @@
 import {
   isLocalMode,
   getLocalGatewayUrl,
+  isRemoteAssistant,
 } from "@/lib/local-mode";
 import type { LockfileAssistant } from "@/runtime/local-mode-host";
 
@@ -136,6 +137,13 @@ export async function ensureGatewayToken(tokenUrl?: string, guardianToken?: stri
 export function getLocalTokenUrl(
   assistant?: LockfileAssistant,
 ): string | undefined {
+  if (!assistant) return undefined;
+  // Remote gateways only accept /auth/token from loopback. The dev server
+  // mints over an SSH tunnel via __local/gateway-token instead of the public
+  // __remote proxy.
+  if (isRemoteAssistant(assistant)) {
+    return `/assistant/__local/gateway-token/${encodeURIComponent(assistant.assistantId)}`;
+  }
   const gatewayUrl = getLocalGatewayUrl(assistant);
   if (!gatewayUrl) return undefined;
   return `${gatewayUrl}/auth/token`;

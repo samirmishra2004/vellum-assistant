@@ -1,4 +1,4 @@
-import { join } from "path";
+import { resolveGcloudCommand } from "../lib/gcloud-command.js";
 
 import {
   extractHostFromUrl,
@@ -155,7 +155,7 @@ const REMOTE_SSH_TIMEOUT_MS = 30_000;
 
 async function getRemoteProcessesGcp(entry: AssistantEntry): Promise<string> {
   return execOutput(
-    "gcloud",
+    resolveGcloudCommand(),
     [
       "compute",
       "ssh",

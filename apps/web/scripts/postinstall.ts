@@ -43,6 +43,16 @@ function ensureSymlink(target: string, linkPath: string): void {
   } catch {
     // best-effort
   }
+  if (process.platform === "win32") {
+    // Junctions work without Developer Mode; symlinks require elevated privileges.
+    const result = spawnSync("cmd", ["/c", "mklink", "/J", linkPath, target], {
+      stdio: "ignore",
+    });
+    if (result.status !== 0) {
+      throw new Error(`Failed to create junction ${linkPath} -> ${target}`);
+    }
+    return;
+  }
   symlinkSync(target, linkPath);
 }
 

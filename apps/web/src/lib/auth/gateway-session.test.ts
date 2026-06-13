@@ -4,8 +4,11 @@ import {
   GatewayTokenError,
   clearGatewayToken,
   ensureGatewayToken,
+  getLocalTokenUrl,
   isRepairableGatewayTokenError,
 } from "@/lib/auth/gateway-session";
+import { isRemoteAssistant } from "@/lib/local-mode";
+import type { LockfileAssistant } from "@/runtime/local-mode-host";
 
 const realFetch = globalThis.fetch;
 
@@ -84,5 +87,19 @@ describe("isRepairableGatewayTokenError", () => {
   test("false for a plain Error or a non-error value", () => {
     expect(isRepairableGatewayTokenError(new Error("nope"))).toBe(false);
     expect(isRepairableGatewayTokenError(undefined)).toBe(false);
+  });
+});
+
+describe("getLocalTokenUrl", () => {
+  test("uses the loopback tunnel mint path for remote GCP assistants", () => {
+    const remote: LockfileAssistant = {
+      assistantId: "vellum-gce",
+      cloud: "gcp",
+      runtimeUrl: "http://34.55.200.115:7830",
+    };
+    expect(getLocalTokenUrl(remote)).toBe(
+      "/assistant/__local/gateway-token/vellum-gce",
+    );
+    expect(isRemoteAssistant(remote)).toBe(true);
   });
 });

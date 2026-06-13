@@ -19,7 +19,7 @@ import { lifecycleService } from "@/assistant/lifecycle-service";
 import { useAssistantQuery } from "@/assistant/queries";
 import { resolveSelectedAssistantId } from "@/assistant/selection";
 import { isGatewayAuthMode } from "@/lib/auth/gateway-session";
-import { getLocalAssistants, isLocalMode } from "@/lib/local-mode";
+import { getSelfHostedAssistants, isLocalMode } from "@/lib/local-mode";
 import { useIsOrgReady } from "@/hooks/use-is-org-ready";
 import { isAuthenticated, type SessionStatus } from "@/stores/session-status";
 import { useClientFeatureFlagStore } from "@/stores/client-feature-flag-store";
@@ -76,7 +76,7 @@ export function useAssistantLifecycle({
   // and a pre-hydration unknown id passes through for the 404 net.
   const selectedPlatformAssistantId =
     resolvedSelectionId &&
-    !getLocalAssistants().some((a) => a.assistantId === resolvedSelectionId)
+    !getSelfHostedAssistants().some((a) => a.assistantId === resolvedSelectionId)
       ? resolvedSelectionId
       : null;
 

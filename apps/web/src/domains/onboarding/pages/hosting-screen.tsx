@@ -74,6 +74,7 @@ export function HostingScreen() {
   const fromSelectAssistant = searchParams.get("from") === "select-assistant";
   const hasPlatformSession = useHasPlatformSession();
   const electron = isElectron();
+  const assistants = useResolvedAssistantsStore.use.assistants();
   const options = useHostingOptions();
   const cloudDisabled = options.find((o) => o.mode === "vellum-cloud")?.disabled;
   const [selected, setSelected] = useState<HostingMode>(
@@ -85,6 +86,12 @@ export function HostingScreen() {
       setSelected("local");
     }
   }, [cloudDisabled, selected]);
+
+  // Already hatched — skip hosting and pick/connect an existing assistant.
+  useEffect(() => {
+    if (fromSelectAssistant || assistants.length === 0) return;
+    void navigate(routes.selectAssistant, { replace: true });
+  }, [assistants.length, fromSelectAssistant, navigate]);
 
   const {
     loading: loginLoading,

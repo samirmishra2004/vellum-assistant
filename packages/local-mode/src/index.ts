@@ -49,3 +49,23 @@ export type {
   GatewayParseResult,
   GatewayProxyDecision,
 } from "./gateway-proxy";
+export {
+  parseRemoteGatewayUrl,
+  readRemoteRuntimeUrls,
+  resolveRemoteGatewayProxyTarget,
+} from "./remote-gateway-proxy";
+export type {
+  RemoteGatewayTarget,
+  RemoteGatewayParseResult,
+  RemoteGatewayProxyDecision,
+} from "./remote-gateway-proxy";
+export {
+  parseGatewayTokenMintPath,
+  readGcpAssistantMeta,
+  mintGcpGatewayTokenViaTunnel,
+} from "./remote-gateway-token";
+export type {
+  GcpAssistantMeta,
+  GatewayTokenMintPathResult,
+  MintGatewayTokenResult,
+} from "./remote-gateway-token";

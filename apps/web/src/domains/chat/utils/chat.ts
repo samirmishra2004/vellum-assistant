@@ -16,6 +16,11 @@ import type { ToolCallRuleContext } from "@/domains/chat/rule-editor-actions";
 
 export const ERROR_MESSAGES: Record<string, string> = {
   rate_limit_exceeded: "Too many requests. Please wait a moment and try again.",
+  RATE_LIMITED: "Too many requests. Please wait a moment and try again.",
+  auth_rate_limited:
+    "Too many failed sign-in attempts. Wait about a minute, then reconnect to your assistant.",
+  queue_full:
+    "The assistant is busy with earlier messages. Wait for the current reply to finish, or start a new conversation.",
   invalid_api_key:
     "The API key for this provider is invalid or expired. Check your API key in Settings → Models & Services.",
 };

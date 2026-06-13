@@ -6,8 +6,10 @@ import {
   resolveCloud,
 } from "../lib/assistant-config";
 import { dockerResourceNames } from "../lib/docker";
+import { resolveGcloudCommand } from "../lib/gcloud-command.js";
 import { getPlatformUrl, readPlatformToken } from "../lib/platform-client";
 import { sshAppleContainer } from "../lib/ssh-apple-container";
+import { spawnCommand } from "../lib/step-runner.js";
 import { interactiveSession } from "../lib/terminal-session";
 
 const SSH_OPTS = [
@@ -95,8 +97,8 @@ export async function ssh(): Promise<void> {
 
     console.log(`🔗 Connecting to ${entry.assistantId} via gcloud...\n`);
 
-    child = spawn(
-      "gcloud",
+    child = spawnCommand(
+      resolveGcloudCommand(),
       ["compute", "ssh", sshTarget, `--project=${project}`, `--zone=${zone}`],
       { stdio: "inherit" },
     );
