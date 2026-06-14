@@ -2,9 +2,10 @@
  * Register the active GCP assistant with the platform and inject credentials
  * into the running instance. Requires `vellum login` first (platform token).
  */
-import { userInfo } from "os";
-
-import { lookupAssistantByIdentifier, resolveAssistant } from "../src/lib/assistant-config.js";
+import {
+  lookupAssistantByIdentifier,
+  resolveAssistant,
+} from "../src/lib/assistant-config.js";
 import { computeDeviceId } from "../src/lib/guardian-token.js";
 import { leaseGcpGuardianTokenViaLocalTunnel } from "../src/lib/gcp.js";
 import {
@@ -60,12 +61,6 @@ if (name) {
 
 if (entry.cloud === "gcp") {
   try {
-    let sshUser: string;
-    try {
-      sshUser = entry.sshUser ?? userInfo().username;
-    } catch {
-      sshUser = entry.sshUser ?? process.env.USER ?? process.env.USERNAME ?? "";
-    }
     await leaseGcpGuardianTokenViaLocalTunnel(
       entry.assistantId,
       entry.project!,
@@ -143,4 +138,8 @@ if (injected) {
   process.exit(1);
 }
 
-console.log("Done. Verify with: vellum exec", entry.assistantId, "-- assistant platform status");
+console.log(
+  "Done. Verify with: vellum exec",
+  entry.assistantId,
+  "-- assistant platform status",
+);
