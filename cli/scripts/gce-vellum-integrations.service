@@ -1,0 +1,20 @@
+[Unit]
+Description=Vellum HTTPS ingress and Telegram webhook (Cloudflare quick tunnel)
+Documentation=https://github.com/vellum-ai/vellum-assistant
+After=vellum.service
+Requires=vellum.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=samir
+Group=samir
+WorkingDirectory=/home/samir
+Environment=PATH=/home/samir/.bun/bin:/home/samir/.local/bin:/usr/sbin:/usr/bin:/bin
+EnvironmentFile=-/home/samir/.config/vellum/env
+ExecStart=/home/samir/restore-gce-integrations.sh @VELLUM_ASSISTANT_ID@
+ExecStop=/usr/bin/pkill -f 'cloudflared tunnel --url http://127.0.0.1:7830' || true
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

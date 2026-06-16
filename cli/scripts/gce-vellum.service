@@ -1,0 +1,21 @@
+[Unit]
+Description=Vellum assistant (gateway + daemon)
+Documentation=https://github.com/vellum-ai/vellum-assistant
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=samir
+Group=samir
+WorkingDirectory=/home/samir
+Environment=PATH=/home/samir/.bun/bin:/home/samir/.local/bin:/usr/sbin:/usr/bin:/bin
+EnvironmentFile=-/home/samir/.config/vellum/env
+ExecStart=/home/samir/.local/bin/vellum wake @VELLUM_ASSISTANT_ID@
+ExecStop=/home/samir/.local/bin/vellum sleep @VELLUM_ASSISTANT_ID@
+TimeoutStartSec=600
+TimeoutStopSec=180
+
+[Install]
+WantedBy=multi-user.target

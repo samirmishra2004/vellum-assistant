@@ -307,7 +307,10 @@ export interface WatchHatchingResult {
 }
 
 const INSTALL_SCRIPT_REMOTE_PATH = "/tmp/vellum-install.sh";
-const MACHINE_TYPE = "e2-standard-4"; // 4 vCPUs, 16 GB memory
+const MACHINE_TYPE = "e2-micro"; // Free-tier eligible in us-central1/us-east1/us-west1
+const BOOT_DISK_IMAGE_FAMILY = "ubuntu-2404-lts-amd64";
+const BOOT_DISK_IMAGE_PROJECT = "ubuntu-os-cloud";
+const BOOT_DISK_SIZE_GB = 30;
 /** Local port for the SSH tunnel used to reach loopback-only guardian/init. */
 const GCP_TUNNEL_LOCAL_PORT = 17830;
 
@@ -464,8 +467,7 @@ async function resolveGcpBootstrapSecret(
     return lookup.entry.guardianBootstrapSecret;
   }
 
-  const sshUser =
-    lookup.status === "found" ? lookup.entry.sshUser : undefined;
+  const sshUser = lookup.status === "found" ? lookup.entry.sshUser : undefined;
   const recovered = await fetchGcpBootstrapSecretFromVm(
     instanceName,
     project,
@@ -809,9 +811,9 @@ export async function hatchGcp(
         `--project=${project}`,
         `--zone=${zone}`,
         `--machine-type=${MACHINE_TYPE}`,
-        "--image-family=debian-11",
-        "--image-project=debian-cloud",
-        "--boot-disk-size=50GB",
+        `--image-family=${BOOT_DISK_IMAGE_FAMILY}`,
+        `--image-project=${BOOT_DISK_IMAGE_PROJECT}`,
+        `--boot-disk-size=${BOOT_DISK_SIZE_GB}GB`,
         "--boot-disk-type=pd-standard",
         `--metadata-from-file=startup-script=${startupScriptPath}`,
         `--labels=species=${species},vellum-assistant=true${hatchedBy ? `,hatched-by=${hatchedBy.toLowerCase().replace(/[^a-z0-9_-]/g, "_")}` : ""}`,

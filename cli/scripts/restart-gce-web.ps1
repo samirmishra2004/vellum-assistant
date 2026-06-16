@@ -5,6 +5,7 @@
 #   .\restart-gce-web.ps1 -AssistantName vellum-gce
 #   .\restart-gce-web.ps1 -NoBrowser
 #   .\restart-gce-web.ps1 -NoLease
+#   .\restart-gce-web.ps1 -Foreground   # visible PowerShell window (default is background)
 #
 # Double-click restart-gce-web.bat to run with defaults.
 
@@ -13,7 +14,8 @@ param(
   [string]$Project = $env:GCP_PROJECT,
   [string]$Zone = $env:GCP_DEFAULT_ZONE,
   [switch]$NoBrowser,
-  [switch]$NoLease
+  [switch]$NoLease,
+  [switch]$Foreground
 )
 
 $ErrorActionPreference = "Stop"
@@ -34,4 +36,4 @@ Write-Host "[1/2] Stopping stale web server and SSH tunnels..."
 Stop-GceWebStack -Context $ctx
 
 Write-Host "[2/2] Starting web stack..."
-Start-GceWebStack -Context $ctx -NoLease:$NoLease -NoBrowser:$NoBrowser
+Start-GceWebStack -Context $ctx -NoLease:$NoLease -NoBrowser:$NoBrowser -Background:(-not $Foreground)

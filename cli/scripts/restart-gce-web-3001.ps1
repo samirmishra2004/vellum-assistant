@@ -1,11 +1,13 @@
 # Restart Vellum GCE web on a fixed port (default 3001).
+# Runs the web client in a hidden background process by default (safe to close this window).
 param(
   [string]$AssistantName = "vellum-gce",
   [string]$Project = $env:GCP_PROJECT,
   [string]$Zone = $env:GCP_DEFAULT_ZONE,
   [int]$WebPort = 3001,
   [switch]$NoBrowser,
-  [switch]$NoLease
+  [switch]$NoLease,
+  [switch]$Foreground
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,12 +33,22 @@ if (-not $NoLease) {
   Invoke-GceGuardianLease -Context $ctx
 }
 
-Write-Host "Starting web dev server in a new window..."
-Start-GceWebClientWindow -Context $ctx
+$background = -not $Foreground
+if ($background) {
+  Write-Host "Starting web dev server in the background..."
+} else {
+  Write-Host "Starting web dev server in a new window..."
+}
+Start-GceWebClient -Context $ctx -Background:$background
 
 Write-Host "Waiting for $($ctx.WebUrl) ..."
 if (-not (Wait-HttpReady -Url $ctx.WebUrl -TimeoutSec 180)) {
-  throw "Web server did not become ready within 180s. Check the new PowerShell window for errors."
+  $hint = if ($background) {
+    "Check the log under $env:LOCALAPPDATA\vellum\logs"
+  } else {
+    "Check the new PowerShell window for errors"
+  }
+  throw "Web server did not become ready within 180s. $hint."
 }
 
 Write-Host "Ready: $($ctx.WebUrl)" -ForegroundColor Green

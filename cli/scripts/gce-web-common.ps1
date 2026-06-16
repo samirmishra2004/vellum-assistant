@@ -349,8 +349,18 @@ function Invoke-GceGuardianLease {
   }
 }
 
-function Start-GceWebClientWindow {
+function Get-GceWebClientLogPath {
   param($Context)
+  $logDir = Join-Path $env:LOCALAPPDATA "vellum\logs"
+  New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+  return Join-Path $logDir "gce-web-$($Context.AssistantName)-port$($Context.Ports.WebServer).log"
+}
+
+function Start-GceWebClient {
+  param(
+    $Context,
+    [switch]$Background
+  )
   $webPort = $Context.Ports.WebServer
   $webUrl = $Context.WebUrl
   $clientCmd = @"
@@ -365,7 +375,32 @@ function Start-GceWebClientWindow {
 Set-Location '$($Context.CliDir)'
 bun run src/index.ts client $($Context.AssistantName) --interface web --disable-platform
 "@
+
+  if ($Background) {
+    $logFile = Get-GceWebClientLogPath -Context $Context
+    $starterScript = Join-Path (Split-Path $logFile -Parent) "run-gce-web-$($Context.AssistantName)-port$webPort.ps1"
+    @"
+`$ErrorActionPreference = 'Continue'
+`$logFile = '$logFile'
+Add-Content -Path `$logFile -Value "`n==== Started `$(Get-Date -Format o) ===="
+$clientCmd *>> `$logFile 2>&1
+"@ | Set-Content -Path $starterScript -Encoding UTF8
+
+    Start-Process powershell `
+      -ArgumentList @("-NoProfile", "-WindowStyle", "Hidden", "-File", $starterScript) `
+      -WindowStyle Hidden | Out-Null
+
+    Write-Host "Web client running in background." -ForegroundColor Green
+    Write-Host "Logs: $logFile" -ForegroundColor DarkGray
+    return
+  }
+
   Start-Process powershell -ArgumentList @("-NoExit", "-Command", $clientCmd) | Out-Null
+}
+
+function Start-GceWebClientWindow {
+  param($Context)
+  Start-GceWebClient -Context $Context
 }
 
 function Write-GceWebAuthHint {
@@ -381,7 +416,8 @@ function Start-GceWebStack {
     [switch]$NoLease,
     [switch]$NoBrowser,
     [switch]$SkipReadyWait,
-    [switch]$Force
+    [switch]$Force,
+    [switch]$Background
   )
 
   if ($Force) {
@@ -430,13 +466,22 @@ function Start-GceWebStack {
     Write-Host "Skipping guardian token lease (-NoLease)."
   }
 
-  Write-Host "Starting web dev server in a new window..."
-  Start-GceWebClientWindow -Context $Context
+  if ($Background) {
+    Write-Host "Starting web dev server in the background..."
+  } else {
+    Write-Host "Starting web dev server in a new window..."
+  }
+  Start-GceWebClient -Context $Context -Background:$Background
 
   if (-not $SkipReadyWait) {
     Write-Host "Waiting for $($Context.WebUrl) ..."
     if (-not (Wait-HttpReady -Url $Context.WebUrl -TimeoutSec 120)) {
-      throw "Web server did not become ready within 120s. Check the new PowerShell window for errors."
+      $hint = if ($Background) {
+        "Check the log file under $env:LOCALAPPDATA\vellum\logs"
+      } else {
+        "Check the new PowerShell window for errors"
+      }
+      throw "Web server did not become ready within 120s. $hint."
     }
     Write-Host "Web server is up." -ForegroundColor Green
   }
